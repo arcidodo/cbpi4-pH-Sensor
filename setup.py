@@ -22,6 +22,7 @@ setup(name='cbpi4-pH-Sensor',
       install_requires=[
             'cbpi4>=4.0.0.34',
             'adafruit-circuitpython-ads1x15',
+            'board',
       ],
       long_description=long_description,
       long_description_content_type='text/markdown'
