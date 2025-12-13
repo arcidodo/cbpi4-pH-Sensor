@@ -24,10 +24,12 @@ setup(name='cbpi4-pH-Sensor',
             'adafruit-circuitpython-ads1x15',
             'board',
             'busio',
+            'smbus',
       ],
       long_description=long_description,
       long_description_content_type='text/markdown'
       )
+
 
 
 

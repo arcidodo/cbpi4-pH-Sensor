@@ -1,81 +1,83 @@
-"""
-CraftBeerPi 4 Plugin – PH4502C pH Sensor via ADS1115
----------------------------------------------------
-Reads pH using ADS1115 + PH4502C module.
-Supports:
-  • Two‑point calibration (pH7 + pH4)
-  • Automatic slope & offset correction
-  • Background sensor polling
-
-Place this file in:
-  ~/craftbeerpi4/modules/ph4502c/__init__.py
-
-Restart CBPi and activate the module.
-"""
-
+from cbpi.api import *
+import smbus
 import asyncio
 import logging
-from cbpi.api import CBPiSensor, Parameters, Property, SensorState, cbpi
-
-import board
-import busio
-from adafruit_ads1x15 import ads1x15
-from adafruit_ads1x15.ads1115 import ADS1115
-from adafruit_ads1x15.analog_in import AnalogIn
 
 logger = logging.getLogger(__name__)
 
-def measure_voltage(channel, samples=10):
-    vals = []
-    for _ in range(samples):
-        vals.append(channel.voltage)
-    vals.sort()
-    filtered = vals[2:-2]
-    return sum(filtered)/len(filtered)
+@parameters([
+    Property.Number("i2c_bus", default=1, description="I2C bus (meestal 1)"),
+    Property.Text("i2c_address", default="0x48", description="ADS1115 I2C adres"),
+    Property.Select("channel", options=["AIN0", "AIN1", "AIN2", "AIN3"], default="AIN1"),
+    Property.Number("ph4_voltage", default=3.11, description="Gemeten spanning bij pH 4"),
+    Property.Number("ph7_voltage", default=2.58, description="Gemeten spanning bij pH 7"),
+    Property.Number("interval", default=2, description="Meet-interval (seconden)")
+])
+class PH_ADS1115(CBPiSensor):
 
+    async def on_start(self):
+        try:
+            self.bus = smbus.SMBus(int(self.i2c_bus))
+            self.address = int(self.i2c_address, 16)
 
-def voltage_to_ph(voltage, V_pH7, slope, offset):
-    return 7 + (voltage - V_pH7) / slope + offset
+            self.channel_map = {
+                "AIN0": 0xC183,
+                "AIN1": 0xD183,
+                "AIN2": 0xE183,
+                "AIN3": 0xF183,
+            }
 
+            logger.info("pH ADS1115 sensor gestart")
 
-@cbpi.sensor
-class PH4502C_Sensor(CBPiSensor):
-    name = "PH4502C via ADS1115"
+        except Exception as e:
+            logger.error(f"I2C init fout: {e}")
+            self.bus = None
 
-    channel: int = Property.Number("ADS1115 Channel (0-3)", configurable=True, default_value=0)
-    vp7: float = Property.Number("Calibration Voltage pH7", configurable=True, default_value=2.597)
-    vp4: float = Property.Number("Calibration Voltage pH4", configurable=True, default_value=3.093)
-    offset: float = Property.Number("Extra pH Offset", configurable=True, default_value=0.0)
-    interval: int = Property.Number("Poll Interval (sec)", configurable=True, default_value=5)
+    async def read_raw(self):
+        if not self.bus:
+            return None
 
-    async def init(self):
-        logger.info("Initializing PH4502C Sensor")
+        try:
+            config = self.channel_map[self.channel]
+            self.bus.write_i2c_block_data(
+                self.address,
+                0x01,
+                [(config >> 8) & 0xFF, config & 0xFF]
+            )
 
-        # Init ADS1115
-        i2c = busio.I2C(board.SCL, board.SDA)
-        self.ads = ADS1115(i2c)
-        self.ads.gain = 1
+            await asyncio.sleep(0.1)
 
-        ads_pins = [ads1x15.Pin.A0, ads1x15.Pin.A1, ads1x15.Pin.A2, ads1x15.Pin.A3]
-        self.channel_obj = AnalogIn(self.ads, ads_pins[int(self.channel)])
+            data = self.bus.read_i2c_block_data(self.address, 0x00, 2)
+            raw = (data[0] << 8) | data[1]
 
-        # Compute slope
-        self.slope = (self.vp4 - self.vp7) / (4 - 7)
-        logger.info(f"Slope: {self.slope:.4f} V/pH")
+            if raw & 0x8000:
+                raw -= 1 << 16
 
-        self.task = asyncio.create_task(self.run())
+            return raw
+
+        except Exception as e:
+            logger.error(f"ADS1115 leesfout: {e}")
+            return None
+
+    def raw_to_voltage(self, raw):
+        return raw * (4.096 / 32768.0)
+
+    def voltage_to_ph(self, voltage):
+        ph4 = float(self.ph4_voltage)
+        ph7 = float(self.ph7_voltage)
+        slope = (7.0 - 4.0) / (ph7 - ph4)
+        return 4.0 + (voltage - ph4) * slope
 
     async def run(self):
-        while True:
-            voltage = measure_voltage(self.channel_obj)
-            ph = voltage_to_ph(voltage, self.vp7, self.slope, self.offset)
+        while self.running:
+            raw = await self.read_raw()
+            if raw is not None:
+                voltage = self.raw_to_voltage(raw)
+                ph = self.voltage_to_ph(voltage)
+                self.value = round(ph, 2)
 
-            await self.push_state(SensorState(value=round(ph, 2)))
+            await asyncio.sleep(int(self.interval))
 
-            logger.debug(f"Voltage: {voltage:.3f} V → pH: {ph:.2f}")
 
-            await asyncio.sleep(self.interval)
-
-    async def stop(self):
-        logger.info("Stopping PH4502C sensor task")
-        self.task.cancel()
+def setup(cbpi):
+    cbpi.plugin.register("PH_ADS1115", PH_ADS1115)
